@@ -133,7 +133,7 @@ Clash YAML 등 다른 형식은 지원하지 않습니다. Endpoint가 호스트
 | --- | --- | --- |
 | 자동 (Linux) | `.conf` 파서·거부 규칙, SOCKS5/CONNECT 인증, WireGuard 루프백 핸드셰이크, 터널 DNS, HTTPS, HTTP 206, 직접 연결 미발생, 피어 중단 시 실패, UDP rebind·리스너 복구, 진단 마스킹 (`go test -race`) | `WireGuard/*_test.go`, CI `go-tests` |
 | 자동 (macOS) | Apple NSURLSession + Network.framework → SOCKS5(인증, failover 금지) → 엔진 → WireGuard 테스트 피어: HTTPS, 206, 터널 DNS, sharedSession, NSData, 직접 연결 미발생, 죽은 피어·잘못된 프로필에서 차단, Google 플래그 패치 로직(목 클래스), 진단 마스킹 | `tests/wireguard`, CI `macos` |
-| 자동 (빌드) | iOS arm64 엔진 아카이브, `WIREGUARD=1` deb 빌드, dylib에 테스트 코드 없음, 라이선스 포함 | CI `macos` |
+| 자동 (빌드) | iOS arm64 엔진 아카이브, `WIREGUARD=1` deb 빌드, dylib에 테스트 코드 없음, 라이선스 포함, 기본 빌드에는 엔진이 들어가지 않음 | CI `macos` (`WireGuard engine check`, deb는 아티팩트로 업로드) |
 | **실기기 필요** | 설치·설정 화면, 실제 YouTube Music 바이너리의 패치 적용, Google 서버 곡 재생·다음 곡·잠금 화면 재생, Wi‑Fi/셀룰러 전환, 실제 WireGuard 서버 | 사용자 확인 |
 
 ## 라이선스

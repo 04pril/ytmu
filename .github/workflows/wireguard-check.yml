@@ -120,6 +120,16 @@ jobs:
           find . -name 'WireGuard-THIRD_PARTY_LICENSES.txt' | grep -q . || { echo "license file missing"; exit 1; }
           if grep -aq YTMUWG_TEST "$DYLIB"; then echo "test-only code in release dylib"; exit 1; fi
 
+      - name: Default build (no WIREGUARD) still builds without the engine
+        run: |
+          cd main
+          rm -rf packages && make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1
+          mkdir -p ../default-check && cd ../default-check && ar x ../main/packages/*.deb && mkdir x && tar -xf data.tar.* -C x
+          DYLIB=$(find x -name 'YTMusicUltimate.dylib' | head -1)
+          if grep -aq nw_proxy_config_create_socksv5 "$DYLIB"; then echo "WireGuard code in default build"; exit 1; fi
+          if otool -L "$DYLIB" | grep -q libresolv; then echo "engine linked into default build"; exit 1; fi
+          ls -l "$DYLIB"
+
       - name: Summary
         if: always()
         run: |

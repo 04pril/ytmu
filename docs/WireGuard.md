@@ -1,4 +1,4 @@
-# 앱 내부 WireGuard (WIREGUARD=1)
+# 앱 내부 WireGuard · HTTP/HTTPS/SOCKS5 프록시 (WIREGUARD=1)
 
 시스템 VPN이나 Network Extension을 켜지 않고, YouTube Music 앱 **자체의** API 요청과 음악 스트리밍을
 사용자가 가져온 WireGuard `.conf`의 서버로 보내는 기능입니다. 기본 빌드에는 포함되지 않고,
@@ -67,6 +67,22 @@ PresharedKey, Endpoint, AllowedIPs, PersistentKeepalive). `AllowedIPs`에 `0.0.0
 Clash YAML 등 다른 형식은 지원하지 않습니다. Endpoint가 호스트 이름이면 서버에 접속하기 위해 기기 DNS로
 한 번 조회합니다(터널을 만들기 전이라 피할 수 없음). 화면에 그 사실이 표시됩니다.
 
+## HTTP · HTTPS · SOCKS5 프록시 모드
+
+WireGuard 대신 외부 프록시 서버를 쓸 수 있습니다. 설정 화면의 연결 종류에서 HTTP/HTTPS/SOCKS5를 고르고
+서버·포트·(선택) 사용자 이름·비밀번호를 입력한 뒤 **이 연결 방식 저장** → 사용 켜기 → 앱 재시작.
+
+- 같은 URLSession 훅으로 `nw_proxy_config`를 적용하며 직접 연결 failover는 금지입니다. 설정을 읽을 수 없으면
+  (Keychain 잠김 등) 요청을 차단합니다.
+- HTTP/HTTPS는 HTTP CONNECT입니다. HTTPS는 프록시와의 구간을 TLS로 암호화하고 시스템 신뢰 저장소로 프록시
+  인증서를 검증합니다(자체 서명 인증서 프록시는 연결되지 않음). SOCKS5는 사용자 이름/비밀번호 인증을 지원합니다.
+- 호스트 이름은 프록시 서버가 조회합니다(CONNECT/SOCKS5에 이름을 그대로 전달). 앱 내 "터널 DNS" 확인은
+  WireGuard 모드에서만 동작합니다.
+- 비밀번호는 Keychain(이 기기 전용)에 저장하며 진단에는 서버 주소와 비밀번호가 들어가지 않습니다.
+- YTMusicUltimate 다운로드(FFmpeg)는 HTTP 프록시만 지원합니다. HTTPS·SOCKS5 모드에서는 직접 연결로 새지 않도록
+  다운로드를 차단합니다.
+- Envoy/Cronet/HTTP3 전송 패치는 WireGuard 모드와 똑같이 적용됩니다(이 경로들은 어떤 프록시도 거치지 않음).
+
 ## 개인정보·보안
 
 - `.conf`(개인키 포함)는 Keychain에 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`로만 저장합니다.
@@ -132,6 +148,7 @@ Clash YAML 등 다른 형식은 지원하지 않습니다. Endpoint가 호스트
 | 구분 | 내용 | 어디서 |
 | --- | --- | --- |
 | 자동 (Linux) | `.conf` 파서·거부 규칙, SOCKS5/CONNECT 인증, WireGuard 루프백 핸드셰이크, 터널 DNS, HTTPS, HTTP 206, 직접 연결 미발생, 피어 중단 시 실패, UDP rebind·리스너 복구, 진단 마스킹 (`go test -race`) | `WireGuard/*_test.go`, CI `go-tests` |
+| 자동 (macOS, 프록시 모드) | NSURLSession → 로컬 테스트 프록시: HTTP CONNECT(Basic 인증·407 재시도, 인증 없음), SOCKS5(인증)에서 HTTPS 206 통과 / SOCKS5 잘못된 비밀번호, 신뢰할 수 없는 인증서의 HTTPS 프록시, 닫힌 프록시 포트에서는 원 서버에 도달하지 않음 / FFmpeg 환경변수 / 진단에 비밀번호 없음 | `tests/wireguard`, CI `macos` |
 | 자동 (macOS) | Apple NSURLSession + Network.framework → SOCKS5(인증, failover 금지) → 엔진 → WireGuard 테스트 피어: HTTPS, 206, 터널 DNS, sharedSession, NSData, 직접 연결 미발생, 죽은 피어·잘못된 프로필에서 차단, Google 플래그 패치 로직(목 클래스), 진단 마스킹 | `tests/wireguard`, CI `macos` |
 | 자동 (빌드) | iOS arm64 엔진 아카이브, `WIREGUARD=1` deb 빌드, dylib에 테스트 코드 없음, 라이선스 포함, 기본 빌드에는 엔진이 들어가지 않음 | CI `macos` (`WireGuard engine check`, deb는 아티팩트로 업로드) |
 | **실기기 필요** | 설치·설정 화면, 실제 YouTube Music 바이너리의 패치 적용, Google 서버 곡 재생·다음 곡·잠금 화면 재생, Wi‑Fi/셀룰러 전환, 실제 WireGuard 서버 | 사용자 확인 |

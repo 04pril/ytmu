@@ -132,7 +132,7 @@
         ];
         if (NSClassFromString(@"YTMUWGSettingsController")) {
             settingsData = [settingsData arrayByAddingObject:@{
-                @"title": [NSBundle.ytmu_defaultBundle localizedStringForKey:@"WG_TITLE" value:@"App-local WireGuard" table:nil],
+                @"title": [NSBundle.ytmu_defaultBundle localizedStringForKey:@"WG_TITLE" value:@"In-app WireGuard / Proxy" table:nil],
                 @"image": @"lock.shield"}];
         }
 

@@ -18,6 +18,12 @@ NSString *const YTMUWGVersion = @"1.0";
 static NSString *const kDefaultsKey = @"YTMUWireGuard";
 static NSString *const kKeychainService = @"YTMusicUltimate.WireGuard";
 static NSString *const kKeychainAccount = @"profile";
+static NSString *const kKeychainProxyAccount = @"proxy-password";
+
+NSString *const YTMUWGKindWireGuard = @"wireguard";
+NSString *const YTMUWGKindHTTP = @"http";
+NSString *const YTMUWGKindHTTPS = @"https";
+NSString *const YTMUWGKindSOCKS5 = @"socks5";
 
 #pragma mark - State
 
@@ -32,6 +38,13 @@ static atomic_uint gConfigsProxied, gSessionsProxied, gBackgroundConfigs, gShare
 static atomic_uint gProxyFailures, gBlockedRequests, gHTTP3Cleared, gDataURLFetches;
 static atomic_uint gRebinds;
 static BOOL gFFmpegProxy;
+static NSString *gFFmpegMode = @"not set";
+
+// External proxy mode (HTTP / HTTPS / SOCKS5) for this launch.
+static NSString *gKind = @"";
+static char gProxyHost[256], gProxyPort[8];
+static char *gProxyUser, *gProxyPass; // strdup'ed, NULL when no authentication
+static BOOL gBlockAll;                // enabled but unusable configuration: block, never direct
 
 YTMUWGState YTMUWGCurrentState(void) { return (YTMUWGState)atomic_load(&gState); }
 BOOL YTMUWGActiveThisLaunch(void) { return gActive; }
@@ -44,6 +57,8 @@ NSString *YTMUWGStateDescription(YTMUWGState state) {
         case YTMUWGStateStarting: return @"starting";
         case YTMUWGStateRunning: return @"running";
         case YTMUWGStateFailed: return @"failed (traffic blocked)";
+        case YTMUWGStateExternalProxy: return @"external proxy applied";
+        case YTMUWGStateBlocked: return @"configuration unusable (traffic blocked)";
     }
     return @"unknown";
 }
@@ -81,6 +96,26 @@ BOOL YTMUWGSettingForceNativeStack(void) {
 }
 void YTMUWGSetSettingForceNativeStack(BOOL enabled) { SetSetting(@"forceNativeStack", @(enabled)); }
 
+NSString *YTMUWGSettingKind(void) {
+#ifdef YTMUWG_TESTING
+    if (TestEnv(@"YTMUWG_TEST_KIND")) return TestEnv(@"YTMUWG_TEST_KIND");
+#endif
+    NSString *kind = SettingsDict()[@"kind"];
+    return [@[YTMUWGKindWireGuard, YTMUWGKindHTTP, YTMUWGKindHTTPS, YTMUWGKindSOCKS5] containsObject:kind ?: @""] ? kind : YTMUWGKindWireGuard;
+}
+
+NSDictionary *YTMUWGSettingExternalProxy(void) {
+#ifdef YTMUWG_TESTING
+    if (TestEnv(@"YTMUWG_TEST_HOST"))
+        return @{@"host": TestEnv(@"YTMUWG_TEST_HOST"), @"port": TestEnv(@"YTMUWG_TEST_PORT") ?: @"", @"username": TestEnv(@"YTMUWG_TEST_USER") ?: @""};
+#endif
+    NSDictionary *d = SettingsDict();
+    NSString *(^str)(NSString *) = ^NSString *(NSString *key) { return [d[key] isKindOfClass:NSString.class] ? d[key] : @""; };
+    return @{@"host": str(@"host"), @"port": str(@"port"), @"username": str(@"username")};
+}
+
+NSString *YTMUWGActiveKind(void) { return gActive ? gKind : @""; }
+
 static BOOL YTMUMasterEnabled(void) {
 #ifdef YTMUWG_TESTING
     return YES;
@@ -101,6 +136,8 @@ NSString *YTMUWGAppVersion(void) {
 #pragma mark - iOS 17 proxy API (resolved at runtime; the repo builds with the iOS 16.5 SDK)
 
 typedef void *(*CreateSocksFn)(void *endpoint);
+typedef void *(*CreateHTTPConnectFn)(void *endpoint, void *tlsOptions);
+static CreateHTTPConnectFn pCreateHTTPConnect;
 typedef void (*SetUserPassFn)(void *config, const char *user, const char *pass);
 typedef void (*SetFailoverFn)(void *config, bool allowed);
 typedef bool (*GetFailoverFn)(void *config);
@@ -123,12 +160,13 @@ BOOL YTMUWGIsSupportedOS(void) {
         if ([NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:minimum]) {
             dlopen("/System/Library/Frameworks/Network.framework/Network", RTLD_LAZY);
             pCreateSocks = (CreateSocksFn)dlsym(RTLD_DEFAULT, "nw_proxy_config_create_socksv5");
+            pCreateHTTPConnect = (CreateHTTPConnectFn)dlsym(RTLD_DEFAULT, "nw_proxy_config_create_http_connect");
             pSetUserPass = (SetUserPassFn)dlsym(RTLD_DEFAULT, "nw_proxy_config_set_username_and_password");
             pSetFailover = (SetFailoverFn)dlsym(RTLD_DEFAULT, "nw_proxy_config_set_failover_allowed");
             pGetFailover = (GetFailoverFn)dlsym(RTLD_DEFAULT, "nw_proxy_config_get_failover_allowed");
             sSetProxyConfigurations = NSSelectorFromString(@"setProxyConfigurations:");
             sProxyConfigurations = NSSelectorFromString(@"proxyConfigurations");
-            supported = pCreateSocks && pSetUserPass && pSetFailover && pGetFailover &&
+            supported = pCreateSocks && pCreateHTTPConnect && pSetUserPass && pSetFailover && pGetFailover &&
                 [NSURLSessionConfiguration instancesRespondToSelector:sSetProxyConfigurations] &&
                 [NSURLSessionConfiguration instancesRespondToSelector:sProxyConfigurations];
         }
@@ -162,18 +200,39 @@ static void BlockConfiguration(NSURLSessionConfiguration *config) {
         config.protocolClasses = [@[YTMUWGBlockedURLProtocol.class] arrayByAddingObjectsFromArray:classes];
 }
 
-static void ApplyProxy(NSURLSessionConfiguration *config) {
-    if (!gActive || ![config isKindOfClass:NSURLSessionConfiguration.class]) return;
-    @try {
+// One nw_proxy_config for the mode of this launch. NULL means "block".
+static id CreateProxyConfig(void) {
+    if (gBlockAll) return nil;
+    if ([gKind isEqualToString:YTMUWGKindWireGuard]) {
         char port[8];
         snprintf(port, sizeof(port), "%d", gPort);
         nw_endpoint_t endpoint = nw_endpoint_create_host("127.0.0.1", port);
         id proxy = endpoint ? (__bridge_transfer id)pCreateSocks((__bridge void *)endpoint) : nil;
+        if (proxy) pSetUserPass((__bridge void *)proxy, gUser, gPass);
+        return proxy;
+    }
+    nw_endpoint_t endpoint = nw_endpoint_create_host(gProxyHost, gProxyPort);
+    if (!endpoint) return nil;
+    id proxy = nil;
+    if ([gKind isEqualToString:YTMUWGKindSOCKS5]) {
+        proxy = (__bridge_transfer id)pCreateSocks((__bridge void *)endpoint);
+    } else {
+        // HTTPS: TLS to the proxy itself, validated against the system trust store.
+        nw_protocol_options_t tls = [gKind isEqualToString:YTMUWGKindHTTPS] ? nw_tls_create_options() : nil;
+        proxy = (__bridge_transfer id)pCreateHTTPConnect((__bridge void *)endpoint, (__bridge void *)tls);
+    }
+    if (proxy && gProxyUser) pSetUserPass((__bridge void *)proxy, gProxyUser, gProxyPass);
+    return proxy;
+}
+
+static void ApplyProxy(NSURLSessionConfiguration *config) {
+    if (!gActive || ![config isKindOfClass:NSURLSessionConfiguration.class]) return;
+    @try {
+        id proxy = CreateProxyConfig();
         if (!proxy) {
             BlockConfiguration(config);
             return;
         }
-        pSetUserPass((__bridge void *)proxy, gUser, gPass);
         pSetFailover((__bridge void *)proxy, false);
         config.connectionProxyDictionary = nil;
         ((void (*)(id, SEL, id))objc_msgSend)(config, sSetProxyConfigurations, @[proxy]);
@@ -337,16 +396,96 @@ NSDictionary *YTMUWGProxyCounters(void) {
         @"http3Cleared": @(atomic_load(&gHTTP3Cleared)),
         @"dataURLFetches": @(atomic_load(&gDataURLFetches)),
         @"ffmpegProxy": @(gFFmpegProxy),
+        @"ffmpegMode": gFFmpegMode,
         @"rebinds": @(atomic_load(&gRebinds)),
     };
 }
 
 #pragma mark - Keychain
 
-static NSMutableDictionary *KeychainQuery(void) {
+static NSMutableDictionary *KeychainQueryFor(NSString *account) {
     return [@{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
               (__bridge id)kSecAttrService: kKeychainService,
-              (__bridge id)kSecAttrAccount: kKeychainAccount} mutableCopy];
+              (__bridge id)kSecAttrAccount: account} mutableCopy];
+}
+static NSMutableDictionary *KeychainQuery(void) { return KeychainQueryFor(kKeychainAccount); }
+
+static OSStatus KeychainWrite(NSString *account, NSData *data) {
+    NSMutableDictionary *query = KeychainQueryFor(account);
+    NSDictionary *attributes = @{(__bridge id)kSecValueData: data,
+                                 (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly};
+    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attributes);
+    if (status == errSecItemNotFound) {
+        [query addEntriesFromDictionary:attributes];
+        status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
+    }
+    return status;
+}
+
+static NSString *ReadProxyPassword(OSStatus *outStatus) {
+#ifdef YTMUWG_TESTING
+    if (TestEnv(@"YTMUWG_TEST_HOST")) {
+        if (outStatus) *outStatus = errSecSuccess;
+        return TestEnv(@"YTMUWG_TEST_PASS") ?: @"";
+    }
+#endif
+    NSMutableDictionary *query = KeychainQueryFor(kKeychainProxyAccount);
+    query[(__bridge id)kSecReturnData] = @YES;
+    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (outStatus) *outStatus = status;
+    if (status != errSecSuccess || !result) return nil;
+    return [[NSString alloc] initWithData:CFBridgingRelease(result) encoding:NSUTF8StringEncoding];
+}
+
+BOOL YTMUWGHasStoredProxyPassword(void) { return ReadProxyPassword(NULL).length > 0; }
+
+static BOOL ValidateExternal(NSString *kind, NSString *host, NSString *port, NSString *username, NSString **reason) {
+    NSString *failure = nil;
+    NSCharacterSet *hostChars = [NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:"];
+    if (![@[YTMUWGKindHTTP, YTMUWGKindHTTPS, YTMUWGKindSOCKS5] containsObject:kind ?: @""])
+        failure = @"unknown proxy kind";
+    else if (![host isKindOfClass:NSString.class] || !host.length || host.length > 253 ||
+             [host rangeOfCharacterFromSet:hostChars.invertedSet].location != NSNotFound)
+        failure = @"server must be a host name or IP address only (no scheme, path or spaces)";
+    else if (![port isKindOfClass:NSString.class] || !port.length || port.length > 5 ||
+             [port rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location != NSNotFound ||
+             port.integerValue < 1 || port.integerValue > 65535)
+        failure = @"port must be a number from 1 to 65535";
+    else if (username.length > 255 || [username rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound)
+        failure = @"invalid user name";
+    if (reason) *reason = failure;
+    return failure == nil;
+}
+
+BOOL YTMUWGSaveConnection(NSString *kind, NSString *host, NSString *port, NSString *username, NSString *password, NSString **reason) {
+    if ([kind isEqualToString:YTMUWGKindWireGuard]) {
+        if (!YTMUWGHasProfile()) {
+            if (reason) *reason = @"import a WireGuard .conf first";
+            return NO;
+        }
+        SetSetting(@"kind", kind);
+        return YES;
+    }
+    host = [host stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    port = [port stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    username = username ?: @"";
+    if (!ValidateExternal(kind, host, port, username, reason)) return NO;
+    if (password) {
+        OSStatus status = password.length
+            ? KeychainWrite(kKeychainProxyAccount, [password dataUsingEncoding:NSUTF8StringEncoding])
+            : SecItemDelete((__bridge CFDictionaryRef)KeychainQueryFor(kKeychainProxyAccount));
+        if (status != errSecSuccess && status != errSecItemNotFound) {
+            if (reason) *reason = [NSString stringWithFormat:@"Keychain error %d", (int)status];
+            return NO;
+        }
+    }
+    NSMutableDictionary *d = [SettingsDict() mutableCopy];
+    [d addEntriesFromDictionary:@{@"kind": kind, @"host": host, @"port": port, @"username": username}];
+    [[NSUserDefaults standardUserDefaults] setObject:d forKey:kDefaultsKey];
+    return YES;
 }
 
 static NSString *ReadProfile(OSStatus *outStatus) {
@@ -391,15 +530,7 @@ NSDictionary *YTMUWGStoredProfileSummary(void) {
 
 BOOL YTMUWGImportProfile(NSString *text, NSString **reason) {
     if (!YTMUWGInspectProfile(text, reason)) return NO;
-    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
-    NSMutableDictionary *query = KeychainQuery();
-    NSDictionary *attributes = @{(__bridge id)kSecValueData: data,
-                                 (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly};
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attributes);
-    if (status == errSecItemNotFound) {
-        [query addEntriesFromDictionary:attributes];
-        status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
-    }
+    OSStatus status = KeychainWrite(kKeychainAccount, [text dataUsingEncoding:NSUTF8StringEncoding]);
     if (status != errSecSuccess) {
         if (reason) *reason = [NSString stringWithFormat:@"Keychain error %d", (int)status];
         return NO;
@@ -413,14 +544,14 @@ BOOL YTMUWGDeleteProfile(NSString **reason) {
         if (reason) *reason = [NSString stringWithFormat:@"Keychain error %d", (int)status];
         return NO;
     }
-    YTMUWGSetSettingEnabled(NO);
+    if ([YTMUWGSettingKind() isEqualToString:YTMUWGKindWireGuard]) YTMUWGSetSettingEnabled(NO);
     return YES;
 }
 
 #pragma mark - Engine
 
 NSDictionary *YTMUWGEngineStatus(void) {
-    if (!gActive) return @{@"running": @NO};
+    if (!gActive || ![gKind isEqualToString:YTMUWGKindWireGuard]) return @{@"running": @NO};
     return JSONFromGo(YTMUWGStatus()) ?: @{@"running": @NO};
 }
 
@@ -459,7 +590,7 @@ void YTMUWGRequestRebind(NSString *reason) {
 
 void YTMUWGLookupInTunnel(NSString *host, void (^completion)(NSDictionary *)) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *result = gActive ? JSONFromGo(YTMUWGLookup((char *)host.UTF8String)) : nil;
+        NSDictionary *result = gActive && [gKind isEqualToString:YTMUWGKindWireGuard] ? JSONFromGo(YTMUWGLookup((char *)host.UTF8String)) : nil;
         dispatch_async(dispatch_get_main_queue(), ^{ completion(result ?: @{@"ok": @NO, @"error": @"tunnel not active"}); });
     });
 }
@@ -538,12 +669,62 @@ static void ObserveLifecycle(void) {
     nw_path_monitor_start(monitor);
 }
 
+static NSString *Percent(NSString *s, NSCharacterSet *allowed) {
+    return [s stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"";
+}
+
+// HTTP / HTTPS / SOCKS5 server chosen by the user. No local engine runs; the
+// same URLSession hooks apply an nw_proxy_config with failover disabled.
+static void StartExternalProxy(void) {
+    gActive = YES;
+    NSDictionary *cfg = YTMUWGSettingExternalProxy();
+    NSString *host = cfg[@"host"], *port = cfg[@"port"], *user = cfg[@"username"], *pass = nil;
+    if (!ValidateExternal(gKind, host, port, user, NULL)) gBlockAll = YES;
+    if (!gBlockAll && user.length) {
+        OSStatus status = errSecSuccess;
+        pass = ReadProxyPassword(&status);
+        // Locked Keychain: block rather than connect without credentials.
+        if (status != errSecSuccess && status != errSecItemNotFound) gBlockAll = YES;
+        pass = pass ?: @"";
+    }
+    if (!gBlockAll) {
+        strlcpy(gProxyHost, host.UTF8String, sizeof(gProxyHost));
+        strlcpy(gProxyPort, port.UTF8String, sizeof(gProxyPort));
+        if (user.length) {
+            gProxyUser = strdup(user.UTF8String);
+            gProxyPass = strdup(pass.UTF8String);
+        }
+    }
+    atomic_store(&gState, gBlockAll ? YTMUWGStateBlocked : YTMUWGStateExternalProxy);
+    InstallSessionHooks();
+    YTMUWGInstallTransportPatches();
+    // FFmpeg only speaks HTTP proxies. For HTTPS/SOCKS5 servers (or a blocked
+    // configuration) point it at a closed port so downloads fail instead of
+    // leaving the proxy.
+    NSString *ffmpeg = @"http://127.0.0.1:1";
+    gFFmpegMode = @"blocked (FFmpeg cannot use this proxy kind)";
+    if (!gBlockAll && [gKind isEqualToString:YTMUWGKindHTTP]) {
+        NSString *auth = user.length ? [NSString stringWithFormat:@"%@:%@@", Percent(user, NSCharacterSet.URLUserAllowedCharacterSet),
+                                        Percent(pass, NSCharacterSet.URLPasswordAllowedCharacterSet)] : @"";
+        NSString *hostPart = [host containsString:@":"] ? [NSString stringWithFormat:@"[%@]", host] : host;
+        ffmpeg = [NSString stringWithFormat:@"http://%@%@:%@", auth, hostPart, port];
+        gFFmpegMode = @"external HTTP proxy";
+    }
+    gFFmpegProxy = setenv("http_proxy", ffmpeg.UTF8String, 1) == 0;
+    unsetenv("no_proxy");
+}
+
 __attribute__((constructor)) static void YTMUWGInit(void) {
     @autoreleasepool {
         gQueue = dispatch_queue_create("ytmu.wireguard", DISPATCH_QUEUE_SERIAL);
         if (!YTMUWGSettingEnabled() || !YTMUMasterEnabled()) return;
         if (!YTMUWGIsSupportedOS()) {
             atomic_store(&gState, YTMUWGStateUnsupported);
+            return;
+        }
+        gKind = YTMUWGSettingKind();
+        if (![gKind isEqualToString:YTMUWGKindWireGuard]) {
+            StartExternalProxy();
             return;
         }
         RandomHex(gUser);
@@ -561,6 +742,7 @@ __attribute__((constructor)) static void YTMUWGInit(void) {
         char proxyURL[128];
         snprintf(proxyURL, sizeof(proxyURL), "http://%s:%s@127.0.0.1:%d", gUser, gPass, gPort);
         gFFmpegProxy = setenv("http_proxy", proxyURL, 1) == 0;
+        gFFmpegMode = @"tunnel (local CONNECT)";
         unsetenv("no_proxy");
         ObserveLifecycle();
         StartEngine();
@@ -601,6 +783,11 @@ NSString *YTMUWGDiagnosticsReport(NSDictionary<NSString *, NSString *> *checks) 
     [lines addObject:[NSString stringWithFormat:@"setting.enabled: %@ | active this launch: %@ | supported OS: %@",
         YTMUWGSettingEnabled() ? @"yes" : @"no", gActive ? @"yes" : @"no", YTMUWGIsSupportedOS() ? @"yes" : @"no"]];
     [lines addObject:[NSString stringWithFormat:@"state: %@", YTMUWGStateDescription(YTMUWGCurrentState())]];
+    // The external proxy host is intentionally not included.
+    NSString *mode = gActive ? gKind : YTMUWGSettingKind();
+    [lines addObject:[NSString stringWithFormat:@"mode: %@%@", mode,
+        [mode isEqualToString:YTMUWGKindWireGuard] ? @" (in-app tunnel)" :
+        [NSString stringWithFormat:@" (external proxy, auth %@)", gProxyUser ? @"yes" : @"no"]]];
 
     NSDictionary *st = YTMUWGEngineStatus();
     if ([st[@"running"] boolValue]) {
@@ -616,14 +803,16 @@ NSString *YTMUWGDiagnosticsReport(NSDictionary<NSString *, NSString *> *checks) 
             N(cat[@"media"]), N(cat[@"api"]), N(cat[@"other"])]];
         [lines addObject:[NSString stringWithFormat:@"tunnel.bytes: up %@ down %@ | bind updates %@ failures %@ relistens %@ | endpoint resolved by device DNS: %@",
             N(b[@"up"]), N(b[@"down"]), N(bind[@"updates"]), N(bind[@"failures"]), N(bind[@"relistens"]), [st[@"endpointResolvedLocally"] boolValue] ? @"yes" : @"no"]];
+    } else if (gActive && ![gKind isEqualToString:YTMUWGKindWireGuard]) {
+        [lines addObject:@"engine: not used (external proxy; host names are resolved by the proxy server)"];
     } else {
         [lines addObject:[NSString stringWithFormat:@"engine: not running %@", N(st[@"error"])]];
     }
     NSDictionary *p = YTMUWGProxyCounters();
     [lines addObject:[NSString stringWithFormat:@"proxy.applied: configs %@ sessions %@ background %@ sharedSession %@ | failures %@ blocked %@",
         p[@"configs"], p[@"sessions"], p[@"backgroundConfigs"], p[@"sharedReplaced"], p[@"proxyFailures"], p[@"blockedRequests"]]];
-    [lines addObject:[NSString stringWithFormat:@"proxy.other: http3 requests cleared %@ | NSData URL loads tunnelled %@ | FFmpeg http_proxy %@ | rebinds %@",
-        p[@"http3Cleared"], p[@"dataURLFetches"], [p[@"ffmpegProxy"] boolValue] ? @"set" : @"not set", p[@"rebinds"]]];
+    [lines addObject:[NSString stringWithFormat:@"proxy.other: http3 requests cleared %@ | NSData URL loads tunnelled %@ | FFmpeg %@ | rebinds %@",
+        p[@"http3Cleared"], p[@"dataURLFetches"], [p[@"ffmpegProxy"] boolValue] ? p[@"ffmpegMode"] : @"not set", p[@"rebinds"]]];
     [lines addObjectsFromArray:YTMUWGTransportReportLines()];
     for (NSString *key in [checks.allKeys sortedArrayUsingSelector:@selector(compare:)])
         [lines addObject:[NSString stringWithFormat:@"check.%@: %@", key, checks[key]]];

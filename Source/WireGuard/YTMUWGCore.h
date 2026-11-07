@@ -16,13 +16,29 @@ typedef NS_ENUM(NSInteger, YTMUWGState) {
     YTMUWGStateStarting,
     YTMUWGStateRunning,
     YTMUWGStateFailed,           // engine failed; traffic is blocked, not sent direct
+    YTMUWGStateExternalProxy,    // HTTP / HTTPS / SOCKS5 proxy server applied
+    YTMUWGStateBlocked,          // enabled but the configuration is unusable: traffic blocked
 };
+
+// Connection kinds. WireGuard runs in-app; the others use an external proxy server.
+FOUNDATION_EXPORT NSString *const YTMUWGKindWireGuard; // "wireguard"
+FOUNDATION_EXPORT NSString *const YTMUWGKindHTTP;      // "http"   HTTP CONNECT
+FOUNDATION_EXPORT NSString *const YTMUWGKindHTTPS;     // "https"  HTTP CONNECT over TLS to the proxy
+FOUNDATION_EXPORT NSString *const YTMUWGKindSOCKS5;    // "socks5"
 
 FOUNDATION_EXPORT NSString *const YTMUWGVersion;
 
 // Settings (take effect on next launch).
 BOOL YTMUWGSettingEnabled(void);
 void YTMUWGSetSettingEnabled(BOOL enabled);
+NSString *YTMUWGSettingKind(void);
+NSDictionary *YTMUWGSettingExternalProxy(void); // host, port, username (no password)
+BOOL YTMUWGHasStoredProxyPassword(void);
+// Validates and saves the connection kind (and server fields for external
+// kinds). password == nil keeps the stored password.
+BOOL YTMUWGSaveConnection(NSString *kind, NSString *_Nullable host, NSString *_Nullable port,
+                          NSString *_Nullable username, NSString *_Nullable password, NSString *_Nullable *_Nullable reason);
+NSString *YTMUWGActiveKind(void); // kind applied in this launch, or @"" when inactive
 BOOL YTMUWGSettingForceNativeStack(void);
 void YTMUWGSetSettingForceNativeStack(BOOL enabled);
 

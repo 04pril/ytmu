@@ -115,7 +115,8 @@ static NSString *Env(NSString *name) { return NSProcessInfo.processInfo.environm
  completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completion {
     NSString *host = challenge.protectionSpace.host;
     NSData *der = Env(@"YTMUWG_TEST_CERT") ? [NSData dataWithContentsOfFile:Env(@"YTMUWG_TEST_CERT")] : nil;
-    if (der && [host hasSuffix:@"fixture.test"] &&
+    NSString *suffix = Env(@"YTMUWG_TEST_TRUST_SUFFIX") ?: @"fixture.test";
+    if (der && [host hasSuffix:suffix] &&
         [challenge.protectionSpace.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
         SecTrustRef trust = challenge.protectionSpace.serverTrust;
         SecCertificateRef cert = SecCertificateCreateWithData(NULL, (__bridge CFDataRef)der);
@@ -397,6 +398,37 @@ static void LiveChecks(void) {
     printf("%s\n", YTMUWGDiagnosticsReport(checks).UTF8String);
 }
 
+// External HTTP / HTTPS / SOCKS5 proxy modes against local fixture proxies.
+static void ExternalChecks(void) {
+    NSString *kind = Env(@"YTMUWG_TEST_KIND");
+    BOOL expectOK = [Env(@"YTMUWG_EXPECT_OK") boolValue];
+    CHECK([YTMUWGActiveKind() isEqualToString:kind], "active kind %s", YTMUWGActiveKind().UTF8String);
+    CHECK(YTMUWGCurrentState() == YTMUWGStateExternalProxy, "state %s", YTMUWGStateDescription(YTMUWGCurrentState()).UTF8String);
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    NSArray *proxies = [config valueForKey:@"proxyConfigurations"];
+    bool (*getFailover)(void *) = (bool (*)(void *))dlsym(RTLD_DEFAULT, "nw_proxy_config_get_failover_allowed");
+    CHECK(proxies.count == 1 && !getFailover((__bridge void *)proxies.firstObject), "proxy missing or failover allowed");
+
+    const char *ffmpeg = getenv("http_proxy");
+    if ([kind isEqualToString:@"http"]) CHECK(ffmpeg && strstr(ffmpeg, Env(@"YTMUWG_TEST_PORT").UTF8String), "FFmpeg not pointed at HTTP proxy");
+    else CHECK(ffmpeg && !strcmp(ffmpeg, "http://127.0.0.1:1"), "FFmpeg must be blocked for %s", kind.UTF8String);
+
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config delegate:[FixtureTrust new] delegateQueue:nil];
+    Result r = Get(session, Env(@"YTMUWG_TEST_ORIGIN_URL"), @"bytes=0-9");
+    if (expectOK) {
+        CHECK(r.status == 206 && r.body.length == 10, "%s proxy: HTTP %ld %s", kind.UTF8String, (long)r.status, r.error.description.UTF8String);
+        CHECK([[NSURLSession.sharedSession.configuration valueForKey:@"proxyConfigurations"] count] == 1, "sharedSession not proxied");
+    } else {
+        CHECK(r.error != nil, "%s proxy request succeeded although it must fail (HTTP %ld)", kind.UTF8String, (long)r.status);
+    }
+    NSString *report = ReportText();
+    NSString *pass = Env(@"YTMUWG_TEST_PASS");
+    NSString *modeLine = [NSString stringWithFormat:@"mode: %@ (external proxy", kind];
+    CHECK([report containsString:modeLine], "report mode line:\n%s", report.UTF8String);
+    CHECK(!pass.length || ![report containsString:pass], "report leaks proxy password");
+    printf("PASS external %s: %s\n", kind.UTF8String, expectOK ? "HTTPS byte range (206) through proxy, failover disabled" : "request failed, nothing sent directly");
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSString *mode = argc > 1 ? @(argv[1]) : @"unit";
@@ -404,6 +436,7 @@ int main(int argc, const char *argv[]) {
         else if ([mode isEqualToString:@"net"]) NetworkChecks();
         else if ([mode isEqualToString:@"failclosed"]) FailClosedChecks();
         else if ([mode isEqualToString:@"live"]) LiveChecks();
+        else if ([mode isEqualToString:@"external"]) ExternalChecks();
         else CHECK(NO, "unknown mode %s", mode.UTF8String);
     }
     return 0;

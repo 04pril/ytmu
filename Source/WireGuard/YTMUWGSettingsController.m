@@ -9,12 +9,14 @@
 // Localized string with an English fallback for languages without the key.
 #define WGLOC(key, fallback) [NSBundle.ytmu_defaultBundle localizedStringForKey:key value:fallback table:nil]
 
-typedef NS_ENUM(NSInteger, WGSection) { WGSectionTunnel, WGSectionProfile, WGSectionChecks, WGSectionAdvanced, WGSectionResult, WGSectionCount };
+typedef NS_ENUM(NSInteger, WGSection) { WGSectionTunnel, WGSectionServer, WGSectionProfile, WGSectionChecks, WGSectionAdvanced, WGSectionResult, WGSectionCount };
 typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCheckScan, WGCheckCopy, WGCheckCount };
 
 @interface YTMUWGSettingsController ()
 @property (nonatomic, strong) UISwitch *enabledSwitch;
 @property (nonatomic, strong) UISwitch *forceSwitch;
+@property (nonatomic, strong) UISegmentedControl *kindControl;
+@property (nonatomic, strong) UITextField *hostField, *portField, *userField, *passField;
 @property (nonatomic, copy) NSDictionary *profile;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *checks;
 @property (nonatomic, copy) NSString *resultText;
@@ -29,18 +31,51 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = WGLOC(@"WG_TITLE", @"App-local WireGuard");
+    self.title = WGLOC(@"WG_TITLE", @"In-app WireGuard / Proxy");
     self.checks = [NSMutableDictionary dictionary];
     self.enabledSwitch = [UISwitch new];
     [self.enabledSwitch addTarget:self action:@selector(toggleEnabled:) forControlEvents:UIControlEventValueChanged];
     self.forceSwitch = [UISwitch new];
     [self.forceSwitch addTarget:self action:@selector(toggleForce:) forControlEvents:UIControlEventValueChanged];
+    self.kindControl = [[UISegmentedControl alloc] initWithItems:@[@"WireGuard", @"HTTP", @"HTTPS", @"SOCKS5"]];
+    [self.kindControl addTarget:self action:@selector(kindChanged) forControlEvents:UIControlEventValueChanged];
+    NSDictionary *server = YTMUWGSettingExternalProxy();
+    self.hostField = [self field:@"proxy.example.com" text:server[@"host"]];
+    self.portField = [self field:@"8080" text:server[@"port"]];
+    self.portField.keyboardType = UIKeyboardTypeNumberPad;
+    self.userField = [self field:WGLOC(@"WG_OPTIONAL", @"optional") text:server[@"username"]];
+    self.passField = [self field:YTMUWGHasStoredProxyPassword() ? WGLOC(@"WG_PASSWORD_SAVED", @"saved (leave empty to keep)") : WGLOC(@"WG_OPTIONAL", @"optional") text:nil];
+    self.passField.secureTextEntry = YES;
+    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
     self.tableView.estimatedRowHeight = 48;
     [self reloadState];
 }
 
+- (UITextField *)field:(NSString *)placeholder text:(NSString *)text {
+    UITextField *field = [[UITextField alloc] initWithFrame:CGRectMake(0, 0, 200, 34)];
+    field.placeholder = placeholder;
+    field.text = text;
+    field.textAlignment = NSTextAlignmentRight;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    return field;
+}
+
+static NSArray<NSString *> *Kinds(void) { return @[YTMUWGKindWireGuard, YTMUWGKindHTTP, YTMUWGKindHTTPS, YTMUWGKindSOCKS5]; }
+
+- (NSString *)selectedKind { return Kinds()[MAX(0, self.kindControl.selectedSegmentIndex)]; }
+- (BOOL)selectedWireGuard { return [self.selectedKind isEqualToString:YTMUWGKindWireGuard]; }
+
+- (void)kindChanged {
+    [self.view endEditing:YES];
+    [self.tableView reloadData];
+}
+
 - (void)reloadState {
+    NSUInteger index = [Kinds() indexOfObject:YTMUWGSettingKind()];
+    self.kindControl.selectedSegmentIndex = index == NSNotFound ? 0 : (NSInteger)index;
     self.profile = YTMUWGStoredProfileSummary();
     self.enabledSwitch.on = YTMUWGSettingEnabled();
     self.forceSwitch.on = YTMUWGSettingForceNativeStack();
@@ -59,6 +94,8 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
         case YTMUWGStateStarting: text = WGLOC(@"WG_STATE_STARTING", @"Starting"); break;
         case YTMUWGStateRunning: text = WGLOC(@"WG_STATE_RUNNING", @"Running"); break;
         case YTMUWGStateFailed: text = WGLOC(@"WG_STATE_FAILED", @"Failed — app traffic is blocked, not sent directly"); break;
+        case YTMUWGStateExternalProxy: text = [NSString stringWithFormat:WGLOC(@"WG_STATE_PROXY", @"%@ proxy applied"), YTMUWGActiveKind().uppercaseString]; break;
+        case YTMUWGStateBlocked: text = WGLOC(@"WG_STATE_BLOCKED", @"Settings unusable — app traffic is blocked, not sent directly"); break;
     }
     if (state == YTMUWGStateRunning) {
         NSDictionary *status = YTMUWGEngineStatus();
@@ -67,7 +104,8 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
                                       : [NSString stringWithFormat:WGLOC(@"WG_HANDSHAKE_AGO", @"handshake %lld s ago"), age];
         text = [NSString stringWithFormat:@"%@ · %@", text, handshake];
     }
-    if (YTMUWGSettingEnabled() != YTMUWGActiveThisLaunch() && state != YTMUWGStateUnsupported)
+    BOOL kindChanged = YTMUWGActiveThisLaunch() && ![YTMUWGActiveKind() isEqualToString:YTMUWGSettingKind()];
+    if ((YTMUWGSettingEnabled() != YTMUWGActiveThisLaunch() || kindChanged) && state != YTMUWGStateUnsupported)
         text = [text stringByAppendingFormat:@"\n%@", WGLOC(@"WG_RESTART_NEEDED", @"Restart the app to apply the change")];
     return text;
 }
@@ -95,8 +133,12 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case WGSectionTunnel: return 2;
-        case WGSectionProfile: return (NSInteger)self.profileRows.count + 2 + (self.profile ? 1 : 0);
+        case WGSectionTunnel: return 3;
+        case WGSectionServer:
+            if (!self.selectedWireGuard) return 5; // host, port, user, password, save
+            return [YTMUWGSettingKind() isEqualToString:YTMUWGKindWireGuard] ? 0 : 1; // save
+        case WGSectionProfile:
+            return self.selectedWireGuard ? (NSInteger)self.profileRows.count + 2 + (self.profile ? 1 : 0) : 0;
         case WGSectionChecks: return WGCheckCount;
         case WGSectionAdvanced: return 1;
         case WGSectionResult: return self.resultText.length ? 1 : 0;
@@ -106,8 +148,9 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case WGSectionTunnel: return WGLOC(@"WG_SECTION_TUNNEL", @"Tunnel");
-        case WGSectionProfile: return WGLOC(@"WG_SECTION_PROFILE", @"WireGuard profile");
+        case WGSectionTunnel: return WGLOC(@"WG_SECTION_TUNNEL", @"Connection");
+        case WGSectionServer: return self.selectedWireGuard ? nil : WGLOC(@"WG_SECTION_SERVER", @"Proxy server");
+        case WGSectionProfile: return self.selectedWireGuard ? WGLOC(@"WG_SECTION_PROFILE", @"WireGuard profile") : nil;
         case WGSectionChecks: return WGLOC(@"WG_SECTION_CHECKS", @"Checks");
         case WGSectionAdvanced: return WGLOC(@"WG_SECTION_ADVANCED", @"Advanced");
         case WGSectionResult: return self.resultText.length ? WGLOC(@"WG_SECTION_RESULT", @"Result") : nil;
@@ -118,8 +161,11 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
         case WGSectionTunnel:
-            return WGLOC(@"WG_FOOTER_TUNNEL", @"No system VPN or network extension is used. YouTube Music's own requests and music streams go through WireGuard inside this app; if the tunnel fails, requests fail instead of going direct. Restart the app after changing this. Requires iOS 17.");
+            return WGLOC(@"WG_FOOTER_TUNNEL", @"No system VPN or network extension is used. YouTube Music's own requests and music streams go through WireGuard inside this app, or through the proxy server you enter. If it fails, requests fail instead of going direct. Restart the app after changing this. Requires iOS 17.");
+        case WGSectionServer:
+            return self.selectedWireGuard ? nil : WGLOC(@"WG_FOOTER_SERVER", @"HTTP and HTTPS use HTTP CONNECT (HTTPS encrypts the connection to the proxy and checks its certificate). Host names are resolved by the proxy server. The password is stored in the Keychain. YTMusicUltimate downloads (FFmpeg) work only with HTTP proxies; with HTTPS or SOCKS5 they are blocked instead of going direct.");
         case WGSectionProfile:
+            if (!self.selectedWireGuard) return nil;
             return WGLOC(@"WG_FOOTER_PROFILE", @"Standard WireGuard .conf with one [Peer] and AllowedIPs 0.0.0.0/0. The private key is stored only in this device's Keychain and is never shown or copied into diagnostics.");
         case WGSectionChecks:
             return WGLOC(@"WG_FOOTER_CHECKS", @"A successful country check does not mean music will play. Also test playback, next track and lock-screen playback, then copy the diagnostics right after any playback error.");
@@ -139,12 +185,35 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 
     if (indexPath.section == WGSectionTunnel) {
         if (row == 0) {
-            cell.textLabel.text = WGLOC(@"WG_ENABLE", @"Use WireGuard in this app");
+            cell.textLabel.text = WGLOC(@"WG_ENABLE", @"Use this connection in the app");
             cell.accessoryView = self.enabledSwitch;
             self.enabledSwitch.enabled = YTMUWGIsSupportedOS();
+        } else if (row == 1) {
+            CGFloat width = MIN(300, self.view.bounds.size.width - 60);
+            self.kindControl.frame = CGRectMake(0, 0, width, 32);
+            [cell.contentView addSubview:self.kindControl];
+            self.kindControl.translatesAutoresizingMaskIntoConstraints = NO;
+            [NSLayoutConstraint activateConstraints:@[
+                [self.kindControl.centerXAnchor constraintEqualToAnchor:cell.contentView.centerXAnchor],
+                [self.kindControl.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8],
+                [self.kindControl.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-8],
+                [self.kindControl.leadingAnchor constraintEqualToAnchor:cell.contentView.layoutMarginsGuide.leadingAnchor]]];
         } else {
             cell.textLabel.text = WGLOC(@"WG_STATUS", @"Status");
             cell.detailTextLabel.text = [self stateLine];
+        }
+    } else if (indexPath.section == WGSectionServer) {
+        if (self.selectedWireGuard || row == 4) {
+            cell.textLabel.text = WGLOC(@"WG_SAVE_CONNECTION", @"Save this connection type");
+            cell.textLabel.textColor = UIColor.systemBlueColor;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else {
+            NSArray *labels = @[WGLOC(@"WG_SERVER", @"Server"), WGLOC(@"WG_PORT", @"Port"), WGLOC(@"WG_USERNAME", @"User name"), WGLOC(@"WG_PASSWORD", @"Password")];
+            NSArray *fields = @[self.hostField, self.portField, self.userField, self.passField];
+            cell.textLabel.text = labels[row];
+            UITextField *field = fields[row];
+            field.frame = CGRectMake(0, 0, MIN(220, self.view.bounds.size.width - 150), 34);
+            cell.accessoryView = field;
         }
     } else if (indexPath.section == WGSectionProfile) {
         NSArray *rows = self.profileRows;
@@ -180,7 +249,9 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == WGSectionProfile) {
+    if (indexPath.section == WGSectionServer && (self.selectedWireGuard || indexPath.row == 4)) {
+        [self saveConnection];
+    } else if (indexPath.section == WGSectionProfile) {
         NSInteger action = indexPath.row - (NSInteger)self.profileRows.count;
         if (action == 0) [self pickFile];
         else if (action == 1) [self importText:UIPasteboard.generalPasteboard.string fromPasteboard:YES];
@@ -215,13 +286,34 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)saveConnection {
+    [self.view endEditing:YES];
+    NSString *password = self.passField.text.length ? self.passField.text : (self.userField.text.length ? nil : @"");
+    NSString *reason = nil;
+    if (!YTMUWGSaveConnection(self.selectedKind, self.hostField.text, self.portField.text, self.userField.text, password, &reason)) {
+        [self alert:WGLOC(@"WG_SAVE_FAILED", @"Could not save") message:reason ?: @""];
+        return;
+    }
+    self.passField.text = nil;
+    self.passField.placeholder = YTMUWGHasStoredProxyPassword() ? WGLOC(@"WG_PASSWORD_SAVED", @"saved (leave empty to keep)") : WGLOC(@"WG_OPTIONAL", @"optional");
+    [self reloadState];
+    if (YTMUWGSettingEnabled() || YTMUWGActiveThisLaunch()) [self offerRestart];
+    else [self alert:WGLOC(@"WG_SAVED", @"Saved") message:WGLOC(@"WG_SAVED_ENABLE", @"Turn on \"Use this connection in the app\", then restart the app.")];
+}
+
 - (void)toggleEnabled:(UISwitch *)sender {
     if (sender.on && !YTMUWGIsSupportedOS()) {
         sender.on = NO;
         [self alert:WGLOC(@"WG_UNSUPPORTED_TITLE", @"Not supported") message:WGLOC(@"WG_STATE_UNSUPPORTED", @"Requires iOS 17 or later")];
         return;
     }
-    if (sender.on && !YTMUWGHasProfile()) {
+    BOOL wireguard = [YTMUWGSettingKind() isEqualToString:YTMUWGKindWireGuard];
+    if (sender.on && !wireguard && ![YTMUWGSettingExternalProxy()[@"host"] length]) {
+        sender.on = NO;
+        [self alert:WGLOC(@"WG_NO_SERVER_TITLE", @"No proxy server") message:WGLOC(@"WG_NO_SERVER", @"Enter the proxy server and tap \"Save this connection type\" first.")];
+        return;
+    }
+    if (sender.on && wireguard && !YTMUWGHasProfile()) {
         sender.on = NO;
         [self alert:WGLOC(@"WG_NO_PROFILE_TITLE", @"No profile") message:WGLOC(@"WG_NO_PROFILE", @"Import a WireGuard .conf file first.")];
         return;
@@ -279,7 +371,7 @@ typedef NS_ENUM(NSInteger, WGCheckRow) { WGCheckCountry, WGCheckConnection, WGCh
     // when the profile came from it (reading it would otherwise prompt).
     if (fromPasteboard) UIPasteboard.generalPasteboard.string = @"";
     [self reloadState];
-    if (!YTMUWGSettingEnabled() && YTMUWGIsSupportedOS()) {
+    if (!YTMUWGSettingEnabled() && YTMUWGIsSupportedOS() && [YTMUWGSettingKind() isEqualToString:YTMUWGKindWireGuard]) {
         YTMUWGSetSettingEnabled(YES);
         [self reloadState];
     }
@@ -357,6 +449,13 @@ static NSString *ErrorText(NSError *error) {
     if (![self requireActive]) return;
     [self setBusy:YES text:WGLOC(@"WG_CHECKING", @"Checking through the tunnel…")];
     NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    if (![YTMUWGActiveKind() isEqualToString:YTMUWGKindWireGuard]) {
+        // External proxy: URLSession sends host names to the proxy (CONNECT / SOCKS5).
+        [lines addObject:WGLOC(@"WG_DNS_BY_PROXY", @"DNS: resolved by the proxy server")];
+        self.checks[@"dns"] = @"resolved by external proxy";
+        [self checkHTTPS:lines];
+        return;
+    }
     // Lookups use the profile's DNS servers through the tunnel (Go netstack).
     NSArray<NSString *> *hosts = @[@"music.youtube.com", @"youtubei.googleapis.com", @"redirector.googlevideo.com"];
     __block NSUInteger pending = hosts.count;

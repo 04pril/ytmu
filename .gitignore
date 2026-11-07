@@ -4,3 +4,4 @@
 .vscode/
 packages/
 WireGuard/build/
+__pycache__/

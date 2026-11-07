@@ -63,6 +63,9 @@ class DirectHandler(http.server.BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=pathlib.Path)
+    parser.add_argument("--live-profile", type=pathlib.Path,
+                        help="real WireGuard .conf: run only the live checks against that server")
+    parser.add_argument("--expect-country", default="", help="expected exit country code for --live-profile")
     args = parser.parse_args()
     results = []
     with tempfile.TemporaryDirectory(prefix="ytmuwg-") as tmp:
@@ -76,6 +79,16 @@ def main():
             str(ROOT / "tests/wireguard/harness.m"), str(tmp / "libytmuwg-macos.a"),
             "-framework", "Foundation", "-framework", "Network", "-framework", "Security",
             "-framework", "CoreFoundation", "-lresolv", "-o", str(harness)])
+
+        if args.live_profile:
+            env_live = dict(os.environ, YTMUWG_TEST_ENABLED="1", YTMUWG_TEST_PROFILE=str(args.live_profile),
+                            YTMUWG_EXPECT_COUNTRY=args.expect_country)
+            proc = subprocess.run([str(harness), "live"], env=env_live, capture_output=True, text=True, timeout=300)
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            if proc.returncode != 0:
+                raise SystemExit(f"FAILED: live check (exit {proc.returncode})")
+            return
 
         peer_dir = tmp / "peer"
         peer_dir.mkdir()

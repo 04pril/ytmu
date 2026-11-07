@@ -327,12 +327,83 @@ static void FailClosedChecks(void) {
     puts("PASS dead WireGuard peer: requests fail, nothing sent directly");
 }
 
+static NSDictionary *LookupSync(NSString *host) {
+    __block NSDictionary *result;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    YTMUWGLookupInTunnel(host, ^(NSDictionary *r) {
+        result = r;
+        dispatch_semaphore_signal(done);
+    });
+    while (dispatch_semaphore_wait(done, DISPATCH_TIME_NOW)) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    return result;
+}
+
+// Live mode: a real WireGuard server from the user's profile (CI secret).
+// Same checks as the in-app "connection diagnostics", through the hooked
+// NSURLSession path the app uses. Prints no key material, full IP or URL
+// query; the exit IP is masked.
+static void LiveChecks(void) {
+    WaitForEngine();
+    NSMutableDictionary *checks = [NSMutableDictionary dictionary];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
+    CHECK([[session.configuration valueForKey:@"proxyConfigurations"] count] == 1, "session not proxied");
+
+    for (NSString *host in @[@"music.youtube.com", @"youtubei.googleapis.com", @"redirector.googlevideo.com"]) {
+        NSDictionary *r = LookupSync(host);
+        printf("LIVE tunnel DNS %s: %s (%s addr, %s ms)\n", host.UTF8String, [r[@"ok"] boolValue] ? "ok" : "FAILED",
+               [[r[@"count"] description] UTF8String], [[r[@"ms"] description] UTF8String]);
+        CHECK([r[@"ok"] boolValue], "tunnel DNS failed for %s: %s", host.UTF8String, [[r[@"error"] description] UTF8String]);
+        checks[[@"dns." stringByAppendingString:host]] = @"ok";
+    }
+
+    Result r = Get(session, @"https://www.cloudflare.com/cdn-cgi/trace", nil);
+    NSString *ip = nil, *loc = nil;
+    for (NSString *line in [r.body componentsSeparatedByString:@"\n"]) {
+        if ([line hasPrefix:@"ip="]) ip = [line substringFromIndex:3];
+        if ([line hasPrefix:@"loc="]) loc = [line substringFromIndex:4];
+    }
+    CHECK(r.status == 200 && loc.length, "country check failed: HTTP %ld %s", (long)r.status, r.error.description.UTF8String);
+    printf("LIVE exit country: %s, exit IP: %s\n", loc.UTF8String, YTMUWGRedactText(ip ?: @"?").UTF8String);
+    NSString *expected = Env(@"YTMUWG_EXPECT_COUNTRY");
+    if (expected.length) CHECK([loc isEqualToString:expected], "exit country %s, expected %s", loc.UTF8String, expected.UTF8String);
+    checks[@"country"] = [NSString stringWithFormat:@"%@ exit %@", loc, ip];
+
+    r = Get(session, @"https://www.google.com/generate_204", nil);
+    printf("LIVE HTTPS www.google.com/generate_204: HTTP %ld %s\n", (long)r.status, r.error ? r.error.domain.UTF8String : "");
+    CHECK(r.status == 204, "generate_204 failed");
+
+    BOOL ranged = NO;
+    for (NSString *url in @[@"https://www.gstatic.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png",
+                            @"https://raw.githubusercontent.com/dayanch96/YTMusicUltimate/main/LICENSE"]) {
+        r = Get(session, url, @"bytes=0-1023");
+        NSString *range = r.headers[@"Content-Range"];
+        printf("LIVE Range %s: HTTP %ld, Content-Range %s\n", [NSURL URLWithString:url].host.UTF8String, (long)r.status,
+               [range hasPrefix:@"bytes 0-1023/"] ? "ok" : "missing");
+        if (r.status == 206 && [range hasPrefix:@"bytes 0-1023/"]) {
+            ranged = YES;
+            break;
+        }
+    }
+    CHECK(ranged, "no HTTP 206 partial response through the tunnel");
+    checks[@"range206"] = @"ok";
+
+    // Informational: the YouTube Music web origin through the exit.
+    r = Get(session, @"https://music.youtube.com/", nil);
+    printf("LIVE music.youtube.com: HTTP %ld %s\n", (long)r.status, r.error ? [NSString stringWithFormat:@"%@ %ld", r.error.domain, (long)r.error.code].UTF8String : "");
+
+    NSDictionary *status = YTMUWGEngineStatus();
+    CHECK([status[@"handshakeAgeSec"] longLongValue] >= 0, "no WireGuard handshake");
+    printf("PASS live: handshake, tunnel DNS, country, HTTPS, HTTP 206 through the real WireGuard server\n");
+    printf("%s\n", YTMUWGDiagnosticsReport(checks).UTF8String);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSString *mode = argc > 1 ? @(argv[1]) : @"unit";
         if ([mode isEqualToString:@"unit"]) UnitChecks();
         else if ([mode isEqualToString:@"net"]) NetworkChecks();
         else if ([mode isEqualToString:@"failclosed"]) FailClosedChecks();
+        else if ([mode isEqualToString:@"live"]) LiveChecks();
         else CHECK(NO, "unknown mode %s", mode.UTF8String);
     }
     return 0;

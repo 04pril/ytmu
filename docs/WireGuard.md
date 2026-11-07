@@ -136,6 +136,19 @@ Clash YAML 등 다른 형식은 지원하지 않습니다. Endpoint가 호스트
 | 자동 (빌드) | iOS arm64 엔진 아카이브, `WIREGUARD=1` deb 빌드, dylib에 테스트 코드 없음, 라이선스 포함, 기본 빌드에는 엔진이 들어가지 않음 | CI `macos` (`WireGuard engine check`, deb는 아티팩트로 업로드) |
 | **실기기 필요** | 설치·설정 화면, 실제 YouTube Music 바이너리의 패치 적용, Google 서버 곡 재생·다음 곡·잠금 화면 재생, Wi‑Fi/셀룰러 전환, 실제 WireGuard 서버 | 사용자 확인 |
 
+## 실제 WireGuard 서버로 확인 (선택)
+
+`WireGuard live server check` 워크플로는 실제 서버로 연결해 macOS의 NSURLSession으로 핸드셰이크, 터널 DNS,
+출구 국가, HTTPS, HTTP 206을 확인합니다. 앱 재생 검증은 아니지만, 내 `.conf`와 서버가 이 엔진에서 동작하는지
+기기 없이 확인할 수 있습니다.
+
+1. 저장소 Settings → Secrets and variables → Actions → **New repository secret**
+2. 이름 `WG_TEST_CONF`, 값에 `.conf` 파일 내용 전체를 붙여넣습니다.
+3. Actions → **WireGuard live server check** → Run workflow (예상 국가 코드, 기본 `US`)
+
+프로필은 Secret에서만 읽고 커밋·출력·업로드하지 않습니다. 로그에는 카운터, 국가, 마스킹된 출구 IP만 나옵니다.
+무료 서버는 GitHub 러너(데이터센터 IP)에서의 연결을 제한할 수 있으므로, 여기서 실패해도 기기에서 다시 확인하세요.
+
 ## 라이선스
 
 정적으로 링크되는 wireguard-go(MIT), gVisor(Apache-2.0), google/btree(Apache-2.0), golang.org/x/*

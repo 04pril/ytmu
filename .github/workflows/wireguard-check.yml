@@ -116,9 +116,9 @@ jobs:
           DYLIB=$(find . -name 'YTMusicUltimate.dylib' | head -1)
           echo "dylib: $DYLIB"
           otool -L "$DYLIB" | grep -E "Network|Security|libresolv"
-          strings -a "$DYLIB" | grep -q nw_proxy_config_create_socksv5 || { echo "WireGuard core not linked"; exit 1; }
+          grep -aq nw_proxy_config_create_socksv5 "$DYLIB" || { echo "WireGuard core not linked"; exit 1; }
           find . -name 'WireGuard-THIRD_PARTY_LICENSES.txt' | grep -q . || { echo "license file missing"; exit 1; }
-          if strings -a "$DYLIB" | grep -q YTMUWG_TEST; then echo "test-only code in release dylib"; exit 1; fi
+          if grep -aq YTMUWG_TEST "$DYLIB"; then echo "test-only code in release dylib"; exit 1; fi
 
       - name: Summary
         if: always()

@@ -327,9 +327,26 @@ jobs:
         if: ${{ inputs.enable_wireguard }}
         run: echo "WG_SUFFIX=_WireGuard" >> $GITHUB_ENV
 
+      - name: Prepare widget for SideStore App Groups
+        run: |
+          set -euo pipefail
+          python3 -m venv widget-tools
+          widget-tools/bin/python -m pip install 'lief==0.17.0'
+          make -C main/WidgetGroupFix
+          WIDGET_LIB=$(find main/WidgetGroupFix/.theos/obj -name 'YTMUWidgetGroupFix.dylib' -print -quit)
+          test -n "$WIDGET_LIB"
+          cp "$WIDGET_LIB" YTMUWidgetGroupFix.dylib
+          WIDGET_SRC=ytmextracted/Payload/YouTubeMusic.app/PlugIns/YouTubeMusicWidgetKitExtension.appex
+          WIDGET_DST=widget-patched/YouTubeMusicWidgetKitExtension.appex
+          test -f "$WIDGET_SRC/Info.plist"
+          ldid -e "$WIDGET_SRC/YouTubeMusicWidgetKitExtension" > widget.entitlements
+          test -s widget.entitlements
+          widget-tools/bin/python main/tools/prepare_widget_extension.py "$WIDGET_SRC" "$WIDGET_DST"
+          ldid -Swidget.entitlements -M "$WIDGET_DST/YouTubeMusicWidgetKitExtension"
+
       - name: Inject tweaks into provided IPA
         run: |
-          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
+          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwf *.deb YTMUWidgetGroupFix.dylib widget-patched/YouTubeMusicWidgetKitExtension.appex -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
 
       - name: Determines the Release Tag Prefix
         run: |

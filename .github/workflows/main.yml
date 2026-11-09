@@ -25,6 +25,12 @@ on:
        type: boolean
        required: true
        default: false
+
+      enable_wireguard:
+       description: "App-local WireGuard (in-app tunnel, iOS 17+, no system VPN)"
+       type: boolean
+       required: true
+       default: false
        
       ipa_url:
         description: "URL to the decrypted IPA file"
@@ -66,7 +72,7 @@ jobs:
       - name: Hide sensitive inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,enable_rymd,enable_ytmabc,enable_youmusicpip,enable_volumeboostyt
+          exclude_inputs: bundle_id,display_name,enable_rymd,enable_ytmabc,enable_youmusicpip,enable_volumeboostyt,enable_wireguard
 
       - name: Validate IPA URL
         run: |
@@ -198,9 +204,30 @@ jobs:
           cd VolumeBoostYT && make clean package DEBUG=0 FINALPACKAGE=1
           mv packages/*.deb ../volumeboostyt.deb
 
+      - name: Set up Go (WireGuard)
+        if: ${{ inputs.enable_wireguard }}
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: main/WireGuard/go.mod
+          cache-dependency-path: main/WireGuard/go.sum
+
+      - name: Build WireGuard engine (iOS arm64)
+        if: ${{ inputs.enable_wireguard }}
+        run: main/WireGuard/build-ios.sh
+
+      - name: Scan YouTube Music transport classes (WireGuard)
+        if: ${{ inputs.enable_wireguard }}
+        run: |
+          python3 -I main/tools/ytm_transport_scan.py ytm.ipa --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ytmextracted/Payload/YouTubeMusic.app/Info.plist)" != "9.42.2" ]; then
+            echo "::warning::WireGuard transport patches were verified on YouTube Music 9.42.2. For this version the music-loader patch is decided at runtime; check the in-app diagnostics after playback."
+          fi
+
       - name: Build Modified YTMusicUltimate Tweak
         run: |
-          cd main && make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1
+          WG_FLAG=""
+          if [ "${{ inputs.enable_wireguard }}" = "true" ]; then WG_FLAG="WIREGUARD=1"; fi
+          cd main && make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1 $WG_FLAG
           mv packages/*.deb ../ytmult.deb
 
       - name: Patch YTMusicUltimate Korean localization
@@ -296,9 +323,13 @@ jobs:
             echo "RELEASE_PREFIX=MaxMusic" >> $GITHUB_ENV
           fi
 
+      - name: Name suffix for WireGuard builds
+        if: ${{ inputs.enable_wireguard }}
+        run: echo "WG_SUFFIX=_WireGuard" >> $GITHUB_ENV
+
       - name: Inject tweaks into provided IPA
         run: |
-          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}.ipa -uwsf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
+          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwsf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
 
       - name: Determines the Release Tag Prefix
         run: |
@@ -315,9 +346,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ env.TAG_PREFIX }}_${{ env.YTM_VERSION }}_2.4.1_(${{ github.run_number }})
-          name: ${{ env.RELEASE_PREFIX }} 2.4.1 and ${{ env.YTM_VERSION }} 
-          files: ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}.ipa
+          tag_name: ${{ env.TAG_PREFIX }}_${{ env.YTM_VERSION }}_2.4.1${{ env.WG_SUFFIX }}_(${{ github.run_number }})
+          name: ${{ env.RELEASE_PREFIX }} 2.4.1 and ${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}
+          files: ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa
           draft: true
 
       - name: Output Release URL

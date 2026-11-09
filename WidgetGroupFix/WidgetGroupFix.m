@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
+#import <dlfcn.h>
 #import <objc/runtime.h>
 
 // SideStore provisions the app's original groups with a team-ID suffix. The
@@ -10,9 +11,14 @@ static NSArray<NSString *> *signedGroups(void) {
     static NSArray<NSString *> *groups;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+        // SecTask is present on iOS but omitted from the public SDK headers.
+        CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+        CFTypeRef (*copyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *) =
+            dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+        if (createTask == NULL || copyEntitlement == NULL) return;
+        CFTypeRef task = createTask(kCFAllocatorDefault);
         if (task == NULL) return;
-        CFTypeRef value = SecTaskCopyValueForEntitlement(task, CFSTR("com.apple.security.application-groups"), NULL);
+        CFTypeRef value = copyEntitlement(task, CFSTR("com.apple.security.application-groups"), NULL);
         CFRelease(task);
         if (value != NULL) {
             if (CFGetTypeID(value) == CFArrayGetTypeID()) {

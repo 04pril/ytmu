@@ -331,7 +331,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv widget-tools
-          widget-tools/bin/python -m pip install 'lief==0.17.0'
+          widget-tools/bin/python -m pip install 'lief==0.17.3'
           make -C main/WidgetGroupFix
           WIDGET_LIB=$(find main/WidgetGroupFix/.theos/obj -name 'YTMUWidgetGroupFix.dylib' -print -quit)
           test -n "$WIDGET_LIB"

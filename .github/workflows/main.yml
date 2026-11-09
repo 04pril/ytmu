@@ -124,8 +124,23 @@ jobs:
       - name: Install cyan
         run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
 
+      - name: Select Python with a macOS LIEF wheel
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install IPA binary tools
+        run: |
+          python3 -m venv widget-tools
+          widget-tools/bin/python -m pip install 'lief==0.17.3'
+
       - name: Download YouTube Music
         run: wget "${{ inputs.ipa_url }}" --no-verbose -O ytm.ipa
+
+      - name: Remove earlier tweak injections from source IPA
+        run: |
+          widget-tools/bin/python main/tools/prepare_source_ipa.py ytm.ipa ytm-clean.ipa
+          mv ytm-clean.ipa ytm.ipa
 
       - name: Get YouTube Music Version 
         run: |
@@ -327,16 +342,9 @@ jobs:
         if: ${{ inputs.enable_wireguard }}
         run: echo "WG_SUFFIX=_WireGuard" >> $GITHUB_ENV
 
-      - name: Select Python with a macOS LIEF wheel
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-
       - name: Prepare widget for SideStore App Groups
         run: |
           set -euo pipefail
-          python3 -m venv widget-tools
-          widget-tools/bin/python -m pip install 'lief==0.17.3'
           make -C main/WidgetGroupFix
           WIDGET_LIB=$(find main/WidgetGroupFix/.theos/obj -name 'YTMUWidgetGroupFix.dylib' -print -quit)
           test -n "$WIDGET_LIB"

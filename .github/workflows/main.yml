@@ -327,6 +327,11 @@ jobs:
         if: ${{ inputs.enable_wireguard }}
         run: echo "WG_SUFFIX=_WireGuard" >> $GITHUB_ENV
 
+      - name: Select Python with a macOS LIEF wheel
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
       - name: Prepare widget for SideStore App Groups
         run: |
           set -euo pipefail

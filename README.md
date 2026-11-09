@@ -64,6 +64,10 @@ You can find pre-built IPAs in the [Download table](#download-table) and the [re
 4. Find a decrypted YTMusic .ipa file (read [this](#how-to-find-decrypted-youtube-music-ipas) if you don't know where to find one) and upload it to a file provider (filebin.net, Dropbox or catbox.moe is recommended; IF YOU USED DROPBOX, YOU HAVE TO CHANGE THE FINAL PART OF THE LINK FROM dl=0 TO dl=1). Paste the url to the necessary field, select the extra tweaks you want and click "Run workflow".
 5. Wait for the build to finish. You can download the tweaked IPA from the releases section of your forked repo. (If you can't find the releases section, go to your forked repo and add /releases to the url. i.e github.com/user/YTMUltimatePLUS/releases)
 
+### Home Screen widget on sideloaded installs
+
+The YouTube Music widget is an app extension. It needs to be included in the IPA and signed with a matching App Group entitlement on both the app and the extension. If its artwork and tiles stay gray, check that the installer/signing service preserved the extension and its App Group. A signing profile without that capability cannot make the stock widget read the app's recent-playback data; rebuild and install with a signing method that supports the same App Group for both targets. Tapping the widget may still open YouTube Music because the widget's actions are supplied by the original app.
+
 ## App-local WireGuard (optional, iOS 17+)
 Check **App-local WireGuard** when running the build workflow to include an in-app WireGuard tunnel: YouTube Music's own requests and music streams go through an imported WireGuard `.conf` without a system VPN or network extension. See [docs/WireGuard.md](docs/WireGuard.md) (Korean) for setup, diagnostics and what has to be verified on a device.
 

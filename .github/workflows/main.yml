@@ -329,7 +329,7 @@ jobs:
 
       - name: Inject tweaks into provided IPA
         run: |
-          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwsf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
+          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
 
       - name: Determines the Release Tag Prefix
         run: |

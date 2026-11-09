@@ -15,9 +15,6 @@ on:
       - "tests/wireguard/**"
       - "tools/ytm_transport_scan.py"
       - "Makefile"
-      - "WidgetGroupFix/**"
-      - "tools/prepare_widget_extension.py"
-      - ".github/workflows/main.yml"
       - ".github/workflows/wireguard-check.yml"
 
 permissions:
@@ -108,11 +105,6 @@ jobs:
               (cd "$THEOS/include" && git clone --quiet --depth=1 "https://github.com/PoomSmart/$repo.git")
             fi
           done
-
-      - name: Build widget App Group shim
-        run: |
-          make -C main/WidgetGroupFix
-          find main/WidgetGroupFix/.theos/obj -name 'YTMUWidgetGroupFix.dylib' -print -quit | grep -q .
 
       - name: Build YTMusicUltimate deb with WIREGUARD=1
         run: |

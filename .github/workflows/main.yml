@@ -361,6 +361,9 @@ jobs:
         run: |
           cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwf *.deb YTMUWidgetGroupFix.dylib widget-patched/YouTubeMusicWidgetKitExtension.appex -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
 
+      - name: Verify widget and linked libraries
+        run: python3 -I main/tools/check_widget_ipa.py ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa
+
       - name: Determines the Release Tag Prefix
         run: |
           if [ "${{ inputs.enable_rymd }}" = "false" ] && \

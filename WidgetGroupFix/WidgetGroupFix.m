@@ -12,9 +12,11 @@ static NSArray<NSString *> *signedGroups(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         // SecTask is present on iOS but omitted from the public SDK headers.
-        CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+        void *security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY | RTLD_LOCAL);
+        if (security == NULL) return;
+        CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(security, "SecTaskCreateFromSelf");
         CFTypeRef (*copyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *) =
-            dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+            dlsym(security, "SecTaskCopyValueForEntitlement");
         if (createTask == NULL || copyEntitlement == NULL) return;
         CFTypeRef task = createTask(kCFAllocatorDefault);
         if (task == NULL) return;

@@ -172,7 +172,12 @@ jobs:
 
       - name: Clone Return-YouTube-Music-Dislikes
         if: ${{ inputs.enable_rymd }}
-        run: git clone --quiet --depth=1 https://github.com/Mark02-2012/RYMD-MaxMusic.git
+        run: |
+          git clone --quiet https://github.com/Mark02-2012/RYMD-MaxMusic.git
+          # The patch below is reviewed against this revision; fail if it no longer applies.
+          git -C RYMD-MaxMusic checkout --quiet 285b244a884a97c52e94988ae26b68c8e6468429
+          git -C RYMD-MaxMusic apply --check "$GITHUB_WORKSPACE/main/patches/rymd-cell-guard.patch"
+          git -C RYMD-MaxMusic apply "$GITHUB_WORKSPACE/main/patches/rymd-cell-guard.patch"
 
       - name: Clone YTMABConfig
         if: ${{ inputs.enable_ytmabc }}

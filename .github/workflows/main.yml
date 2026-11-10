@@ -31,6 +31,12 @@ on:
        type: boolean
        required: true
        default: false
+
+      enable_wireguard:
+       description: "App-local WireGuard (in-app tunnel, iOS 17+, no system VPN)"
+       type: boolean
+       required: true
+       default: false
        
       ipa_url:
         description: "URL to the decrypted IPA file"
@@ -72,7 +78,7 @@ jobs:
       - name: Hide sensitive inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,enable_rymd,enable_ytmabc,enable_youmusicpip,enable_volumeboostyt
+          exclude_inputs: bundle_id,display_name,enable_rymd,enable_ytmabc,enable_youmusicpip,enable_volumeboostyt,enable_lastfm,enable_wireguard
 
       - name: Validate IPA URL
         run: |
@@ -214,26 +220,133 @@ jobs:
           cd ios-yt-music-last.fm && make clean package DEBUG=0 FINALPACKAGE=1
           mv packages/*.deb ../lastfm.deb
 
+      - name: Set up Go (WireGuard)
+        if: ${{ inputs.enable_wireguard }}
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: main/WireGuard/go.mod
+          cache-dependency-path: main/WireGuard/go.sum
+
+      - name: Build WireGuard engine (iOS arm64)
+        if: ${{ inputs.enable_wireguard }}
+        run: main/WireGuard/build-ios.sh
+
+      - name: Scan YouTube Music transport classes (WireGuard)
+        if: ${{ inputs.enable_wireguard }}
+        run: |
+          python3 -I main/tools/ytm_transport_scan.py ytm.ipa --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ytmextracted/Payload/YouTubeMusic.app/Info.plist)" != "9.42.2" ]; then
+            echo "::warning::WireGuard transport patches were verified on YouTube Music 9.42.2. For this version the music-loader patch is decided at runtime; check the in-app diagnostics after playback."
+          fi
+
       - name: Build Modified YTMusicUltimate Tweak
         run: |
-          cd main && make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1
+          WG_FLAG=""
+          if [ "${{ inputs.enable_wireguard }}" = "true" ]; then WG_FLAG="WIREGUARD=1"; fi
+          cd main && make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless SIDELOADING=1 $WG_FLAG
           mv packages/*.deb ../ytmult.deb
+
+      - name: Patch YTMusicUltimate Korean localization
+        run: |
+          # 이 워크플로는 저장소 소스를 빌드하지 않고 미리 빌드된 deb를 받아 쓰기 때문에
+          # layout/ 안의 ko.lproj가 반영되지 않는다. 받은 deb 안에 직접 넣어준다.
+          KO_STRINGS="${{ github.workspace }}/main/layout/Library/Application Support/YTMusicUltimate.bundle/ko.lproj/Localizable.strings"
+          if [ ! -f "$KO_STRINGS" ]; then
+            echo "  ⏭️  ko.lproj/Localizable.strings 없음 — 한글 패치 건너뜀"
+            exit 0
+          fi
+
+          DEB="${{ github.workspace }}/ytmult.deb"
+          WORKDIR="$(mktemp -d)"
+          cd "$WORKDIR"
+
+          ar x "$DEB"
+          DATA_MEMBER=$(ls data.tar.* | head -1)
+          CONTROL_MEMBER=$(ls control.tar.* | head -1)
+          mkdir data_extracted
+          tar -xf "$DATA_MEMBER" -C data_extracted
+
+          BUNDLE=$(find data_extracted -type d -name 'YTMusicUltimate.bundle' | head -1)
+          if [ -z "$BUNDLE" ]; then
+            echo "::error::deb 안에서 YTMusicUltimate.bundle 폴더를 찾지 못했습니다. deb 내부 구조:"
+            find data_extracted -maxdepth 6 | head -50
+            exit 1
+          fi
+          echo "  🔤 [YTMusicUltimate] 번들 위치: $BUNDLE"
+          mkdir -p "$BUNDLE/ko.lproj"
+          cp "$KO_STRINGS" "$BUNDLE/ko.lproj/Localizable.strings"
+
+          # data.tar를 gzip으로 다시 패키징
+          cd data_extracted
+          tar --numeric-owner --owner=0 --group=0 -cf ../data.tar .
+          cd ..
+          gzip -f -9 data.tar
+
+          # macOS의 ar은 정적 라이브러리(.a)용이라 새 아카이브 생성 시 ranlib이 .deb를 깨뜨린다.
+          # OS ar에 의존하지 않고 Python으로 공용 ar 포맷을 직접 만든다.
+          python3 - "$DEB" "$CONTROL_MEMBER" << 'PYEOF'
+          import sys
+
+          def header(name, size):
+              if len(name) > 16:
+                  raise SystemExit(f"member name too long for ar format: {name}")
+              h = (
+                  name.ljust(16) +
+                  "0".ljust(12) +
+                  "0".ljust(6) +
+                  "0".ljust(6) +
+                  "100644".ljust(8) +
+                  str(size).ljust(10) +
+                  "`\n"
+              )
+              assert len(h) == 60, len(h)
+              return h.encode("ascii")
+
+          out_path = sys.argv[1]
+          members = ["debian-binary", sys.argv[2], "data.tar.gz"]
+          with open(out_path, "wb") as out:
+              out.write(b"!<arch>\n")
+              for name in members:
+                  with open(name, "rb") as f:
+                      data = f.read()
+                  out.write(header(name, len(data)))
+                  out.write(data)
+                  if len(data) % 2 == 1:
+                      out.write(b"\n")
+          print(f"  📦 [YTMusicUltimate] 재패키징 완료: {out_path}")
+          PYEOF
+
+          # 재패키징 결과 검증 (깨진 deb가 cyan까지 넘어가지 않도록)
+          SIZE=$(stat -f%z "$DEB")
+          echo "  📏 재패키징된 deb 크기: $SIZE bytes"
+          if [ "$SIZE" -lt 10000 ]; then
+            echo "::error::재패키징된 deb가 비정상적으로 작습니다 ($SIZE bytes)."
+            exit 1
+          fi
+          cd "${{ github.workspace }}"
+          rm -rf "$WORKDIR"
+          echo "  ✅ [YTMusicUltimate] ko.lproj 삽입 완료"
 
       - name: Determines the Release Title Prefix
         run: |
           if [ "${{ inputs.enable_rymd }}" = "false" ] && \
              [ "${{ inputs.enable_volumeboostyt }}" = "false" ] && \
              [ "${{ inputs.enable_youmusicpip }}" = "false" ] && \
-             [ "${{ inputs.enable_ytmabc }}" = "false" ]; then
+             [ "${{ inputs.enable_ytmabc }}" = "false" ] && \
+             [ "${{ inputs.enable_lastfm }}" = "false" ]; then
             
             echo "RELEASE_PREFIX=YTMusicUltimate" >> $GITHUB_ENV
           else
             echo "RELEASE_PREFIX=MaxMusic" >> $GITHUB_ENV
           fi
 
+      - name: Name suffix for WireGuard builds
+        if: ${{ inputs.enable_wireguard }}
+        run: echo "WG_SUFFIX=_WireGuard" >> $GITHUB_ENV
+
       - name: Inject tweaks into provided IPA
         run: |
-          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}.ipa -uwsf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
+          cyan -i ytm.ipa -o ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa -uwf *.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }}
 
       - name: Determines the Release Tag Prefix
         run: |
@@ -251,9 +364,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ env.TAG_PREFIX }}_${{ env.YTM_VERSION }}_2.4.1_(${{ github.run_number }})
-          name: ${{ env.RELEASE_PREFIX }} 2.4.1 and ${{ env.YTM_VERSION }} 
-          files: ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}.ipa
+          tag_name: ${{ env.TAG_PREFIX }}_${{ env.YTM_VERSION }}_2.4.1${{ env.WG_SUFFIX }}_(${{ github.run_number }})
+          name: ${{ env.RELEASE_PREFIX }} 2.4.1 and ${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}
+          files: ${{ env.RELEASE_PREFIX }}_2.4.1_${{ env.YTM_VERSION }}${{ env.WG_SUFFIX }}.ipa
           draft: true
 
       - name: Output Release URL

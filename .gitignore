@@ -5,3 +5,10 @@
 packages/
 WireGuard/build/
 __pycache__/
+output/
+*.ipa
+*.p12
+*.pfx
+*.mobileprovision
+.env
+.env.*

@@ -178,6 +178,8 @@ jobs:
           git -C RYMD-MaxMusic checkout --quiet 285b244a884a97c52e94988ae26b68c8e6468429
           git -C RYMD-MaxMusic apply --check "$GITHUB_WORKSPACE/main/patches/rymd-cell-guard.patch"
           git -C RYMD-MaxMusic apply "$GITHUB_WORKSPACE/main/patches/rymd-cell-guard.patch"
+          git -C RYMD-MaxMusic apply --check "$GITHUB_WORKSPACE/main/patches/rymd-ko.patch"
+          git -C RYMD-MaxMusic apply "$GITHUB_WORKSPACE/main/patches/rymd-ko.patch"
 
       - name: Clone YTMABConfig
         if: ${{ inputs.enable_ytmabc }}
@@ -193,7 +195,11 @@ jobs:
 
       - name: Clone Last.fm Scrobbler
         if: ${{ inputs.enable_lastfm }}
-        run: git clone --quiet --depth=1 https://github.com/ImMALWARE/ios-yt-music-last.fm.git
+        run: |
+          git clone --quiet https://github.com/ImMALWARE/ios-yt-music-last.fm.git
+          git -C ios-yt-music-last.fm checkout --quiet 374c73264b226c73888f5fc21504a5b716b75259
+          git -C ios-yt-music-last.fm apply --check "$GITHUB_WORKSPACE/main/patches/lastfm-ko.patch"
+          git -C ios-yt-music-last.fm apply "$GITHUB_WORKSPACE/main/patches/lastfm-ko.patch"
 
       - name: Build Return-YouTube-Music-Dislikes
         if: ${{ inputs.enable_rymd }}
